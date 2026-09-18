@@ -888,6 +888,7 @@ def ingest_web(url):
             global_chunk_index += 1
 
     print(f"Ingested {global_chunk_index} chunks from {url}")
+    return global_chunk_index
 
 
 def ingest_folder(folder_path):

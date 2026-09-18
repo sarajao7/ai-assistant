@@ -2,6 +2,7 @@ import psycopg2
 import json
 import re
 from sklearn.metrics.pairwise import cosine_similarity
+import bcrypt
 
 
 class Database:
@@ -331,3 +332,316 @@ class Database:
             ))
 
         return results
+    
+
+    
+    def get_admin_stats(self):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT COUNT(*) FROM chunks;")
+        total_chunks = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(DISTINCT document_id)
+            FROM chunks;
+        """)
+        total_documents = cur.fetchone()[0]
+
+        cur.execute("SELECT COUNT(*) FROM queries;")
+        total_queries = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COALESCE(AVG(latency_ms), 0)
+            FROM queries
+            WHERE latency_ms IS NOT NULL;
+        """)
+        average_latency_ms = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM feedback
+            WHERE rating = 1;
+        """)
+        positive_feedback = cur.fetchone()[0]
+
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM feedback
+            WHERE rating = 0;
+        """)
+        negative_feedback = cur.fetchone()[0]
+
+        cur.close()
+        conn.close()
+
+        return {
+            "total_documents": total_documents,
+            "total_chunks": total_chunks,
+            "total_queries": total_queries,
+            "average_latency_ms": float(average_latency_ms),
+            "positive_feedback": positive_feedback,
+            "negative_feedback": negative_feedback
+        }
+
+    def get_admin_analytics(self):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT DATE(created_at) AS date, COUNT(*) AS count
+            FROM queries
+            GROUP BY DATE(created_at)
+            ORDER BY date;
+        """)
+        queries_over_time = cur.fetchall()
+
+        cur.execute("""
+            SELECT topic, COUNT(*) AS count
+            FROM queries
+            WHERE topic IS NOT NULL
+            GROUP BY topic
+            ORDER BY count DESC;
+        """)
+        top_topics = cur.fetchall()
+
+        cur.execute("""
+            SELECT filiere, COUNT(*) AS count
+            FROM queries
+            WHERE filiere IS NOT NULL
+            GROUP BY filiere
+            ORDER BY count DESC;
+        """)
+        top_filieres = cur.fetchall()
+
+        cur.execute("""
+            SELECT rating, COUNT(*) AS count
+            FROM feedback
+            GROUP BY rating
+            ORDER BY rating;
+        """)
+        feedback_distribution = cur.fetchall()
+
+        cur.close()
+        conn.close()
+
+        return {
+            "queries_over_time": queries_over_time,
+            "top_topics": top_topics,
+            "top_filieres": top_filieres,
+            "feedback_distribution": feedback_distribution
+        }
+
+    def get_chunks(self, document_id=None, filiere=None, limit=100):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        query = """
+            SELECT
+                id,
+                document_id,
+                document_name,
+                chunk_index,
+                content,
+                embedding,
+                source,
+                metadata
+            FROM chunks
+            WHERE 1=1
+        """
+
+        params = []
+
+        if document_id:
+            query += " AND document_id = %s"
+            params.append(document_id)
+
+        if filiere:
+            query += " AND metadata::jsonb->>'filiere' = %s"
+            params.append(filiere)
+
+        query += """
+            ORDER BY document_name, chunk_index
+            LIMIT %s;
+        """
+
+        params.append(limit)
+
+        cur.execute(query, tuple(params))
+        rows = cur.fetchall()
+
+        chunks = []
+
+        for row in rows:
+            metadata = row[7] or {}
+
+            if isinstance(metadata, str):
+                metadata = json.loads(metadata)
+
+            chunks.append({
+                "id": row[0],
+                "document_id": row[1],
+                "document_name": row[2],
+                "chunk_index": row[3],
+                "content": row[4],
+                "source": row[6],
+                "metadata": metadata,
+                "page": metadata.get("page"),
+                "filiere": metadata.get("filiere"),
+                "semester": metadata.get("semester"),
+                "module": metadata.get("module"),
+                "heading": metadata.get("heading")
+            })
+
+        cur.close()
+        conn.close()
+
+        return chunks
+
+
+
+
+
+    
+    def save_query(self, query_text, topic=None, filiere=None, latency_ms=None):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            INSERT INTO queries (query_text, topic, filiere, latency_ms)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id;
+            """,
+            (query_text, topic, filiere, latency_ms)
+
+        )
+
+        query_id = cur.fetchone()[0]
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return query_id
+
+
+    def save_feedback(self, query_id, rating):
+        if rating not in (0, 1):
+            raise ValueError("Rating must be 0 or 1")
+
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            INSERT INTO feedback (query_id, rating)
+            VALUES (%s, %s);
+
+            """,
+            (query_id, rating)
+        )
+
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+
+    def create_user(self, name, email, password_hash, role):
+        conn = self.get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+        INSERT INTO users(name, email, password_hash, role) VALUES (%s, %s, %s, %s) RETURNING id;
+        """, (name, email, password_hash, role))
+        new_user_id = cur.fetchone()[0]
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return new_user_id
+
+
+    def get_user_by_email(self, email):
+        conn = self.get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+        SELECT id, name, email, password_hash, role, created_at
+        FROM users
+        WHERE email = %s
+        """, (email,))
+        user = cur.fetchone()
+        
+        cur.close()
+        conn.close()
+        return user
+
+
+    def get_user_by_id(self, user_id):
+        conn = self.get_connection()
+        cur = conn.cursor()
+        cur.execute("""
+        SELECT id, name, email, password_hash, role, created_at
+        FROM users
+        WHERE id = %s;
+        """, (user_id,))
+        user = cur.fetchone()
+
+       
+        cur.close()
+        conn.close()
+        return user
+
+
+
+
+
+
+    def update_user(self, user_id, name, email, role):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            UPDATE users
+            SET name = %s,
+                email = %s,
+                role = %s
+            WHERE id = %s;
+        """, (name, email, role, user_id))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return True
+
+    def hash_password(self, password):
+        password_bytes = password.encode("utf-8")
+        salt = bcrypt.gensalt()
+        hashed = bcrypt.hashpw(password_bytes, salt)
+
+        return hashed.decode("utf-8")
+
+
+    def verify_password(self, password, password_hash):
+        password_bytes = password.encode("utf-8")
+        hash_bytes = password_hash.encode("utf-8")
+
+        return bcrypt.checkpw(password_bytes, hash_bytes)
+
+    def update_password(self, user_id, password_hash):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+        UPDATE users
+        SET password_hash = %s
+        WHERE id = %s;""",(password_hash, user_id))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        return True
+
+

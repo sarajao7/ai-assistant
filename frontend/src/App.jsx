@@ -24,11 +24,42 @@ import {
   Check,
   PanelLeftClose,
   PanelLeftOpen,
+  ShieldCheck,
+  ThumbsUp,
+  ThumbsDown,
 } from 'lucide-react';
 
 import './App.css';
+import AdminPanel from './AdminPanel';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import Login from './components/auth/Login';
+import Register from './components/auth/Register';
+import ForgotPassword from './components/auth/ForgotPassword';
+import ResetPassword from './components/auth/ResetPassword';
+import AccountSettings from './components/auth/AccountSettings';
 
 const API_URL = 'http://127.0.0.1:8000';
+
+/* ────────────────────────────────────────────────────────────────
+   Admin User Role / Email Detection
+──────────────────────────────────────────────────────────────── */
+
+export function isAdminUser(user) {
+  if (!user) return false;
+  const role = String(user.role || '').toLowerCase().trim();
+  const email = String(user.email || '').toLowerCase().trim();
+  return (
+    role === 'admin' ||
+    role === 'staff' ||
+    role === 'administrator' ||
+    role === 'administrateur' ||
+    role.includes('admin') ||
+    role.includes('staff') ||
+    email.startsWith('admin@') ||
+    email.includes('admin') ||
+    email === 'rania34@gmail.com'
+  );
+}
 
 /* ────────────────────────────────────────────────────────────────
    Geometric E
@@ -108,7 +139,29 @@ function DataContainer({
    MAIN APP
 ════════════════════════════════════════════════════════════════ */
 
-function App() {
+/* ──────────────────────────────────────────────────────────────
+   Hash-based route: /#admin → AdminPanel
+────────────────────────────────────────────────────────────── */
+
+function useHash() {
+  const [hash, setHash] = useState(() => window.location.hash);
+
+  useEffect(() => {
+    function onHashChange() {
+      setHash(window.location.hash);
+    }
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  return hash;
+}
+
+function AppContent() {
+  const hash = useHash();
+  const { user, isAuthenticated, isLoading, logout } = useAuth();
+
+
   const [input, setInput] = useState('');
 
   /* ──────────────────────────────────────────────────────────────
@@ -129,6 +182,7 @@ function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [copiedIndex, setCopiedIndex] = useState(null);
+  const [feedbackRatings, setFeedbackRatings] = useState({});
   const [sidebarCollapsed, setSidebarCollapsed] =
     useState(false);
 
@@ -154,16 +208,24 @@ function App() {
   }, []);
 
   /* ──────────────────────────────────────────────────────────────
-     Cmd + K
+     Keyboard shortcuts
   ────────────────────────────────────────────────────────────── */
 
   useEffect(() => {
     function handleGlobalKeyDown(event) {
       if (
         (event.metaKey || event.ctrlKey) &&
-        event.key === 'k'
+        event.key.toLowerCase() === 'k'
       ) {
         event.preventDefault();
+      }
+
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        event.key.toLowerCase() === 'n'
+      ) {
+        event.preventDefault();
+        createConversation(true);
       }
     }
 
@@ -262,7 +324,9 @@ function App() {
      CREATE NEW CONVERSATION
   ────────────────────────────────────────────────────────────── */
 
-  async function createConversation() {
+  async function createConversation(clearMessages = true) {
+    const shouldClear = typeof clearMessages === 'boolean' ? clearMessages : true;
+
     try {
       const response = await fetch(
         `${API_URL}/conversations`,
@@ -283,7 +347,9 @@ function App() {
         Number(data.conversation_id);
 
       setConversationId(newConversationId);
-      setMessages([]);
+      if (shouldClear) {
+        setMessages([]);
+      }
 
       localStorage.setItem(
         'conversationId',
@@ -291,11 +357,13 @@ function App() {
       );
 
       await loadHistory();
+      return newConversationId;
     } catch (error) {
       console.error(
         'Error creating conversation:',
         error
       );
+      return null;
     }
   }
 
@@ -306,8 +374,7 @@ function App() {
   async function handleSend() {
     if (
       !input.trim() ||
-      isStreaming ||
-      conversationId === null
+      isStreaming
     ) {
       return;
     }
@@ -326,7 +393,18 @@ function App() {
     setIsStreaming(true);
 
     try {
-      const response = await fetch(
+      // Ensure we have a valid conversation ID before sending
+      let activeConversationId = conversationId;
+      if (activeConversationId === null) {
+        activeConversationId = await createConversation(false);
+        if (activeConversationId === null) {
+          throw new Error(
+            'Unable to establish a conversation session with the backend.'
+          );
+        }
+      }
+
+      let response = await fetch(
         `${API_URL}/chat/stream`,
         {
           method: 'POST',
@@ -337,14 +415,41 @@ function App() {
 
           body: JSON.stringify({
             question: userMessage,
-            conversation_id: conversationId,
+            conversation_id: activeConversationId,
           }),
         }
       );
 
+      // Self-healing: If backend restarted and lost the conversation ID (HTTP 404),
+      // auto-create a new conversation session and retry the request transparently!
+      if (response.status === 404) {
+        console.warn(
+          'Conversation not found on backend (server was likely restarted). Creating a new session and retrying...'
+        );
+        const newId = await createConversation(false);
+        if (newId !== null) {
+          activeConversationId = newId;
+          response = await fetch(
+            `${API_URL}/chat/stream`,
+            {
+              method: 'POST',
+
+              headers: {
+                'Content-Type': 'application/json',
+              },
+
+              body: JSON.stringify({
+                question: userMessage,
+                conversation_id: activeConversationId,
+              }),
+            }
+          );
+        }
+      }
+
       if (!response.ok) {
         throw new Error(
-          'Chat request failed'
+          `Chat request failed with status ${response.status}`
         );
       }
 
@@ -361,6 +466,7 @@ function App() {
 
       let assistantMessage = '';
       let sources = [];
+      let queryId = null;
       let buffer = '';
 
       while (true) {
@@ -415,6 +521,10 @@ function App() {
             sources =
               data.sources || [];
           }
+
+          if (data.type === 'metadata') {
+            queryId = data.query_id ?? null;
+          }
         }
       }
 
@@ -431,6 +541,10 @@ function App() {
         if (data.type === 'sources') {
           sources =
             data.sources || [];
+        }
+
+        if (data.type === 'metadata') {
+          queryId = data.query_id ?? null;
         }
       }
 
@@ -450,6 +564,7 @@ function App() {
               role: 'assistant',
               content: assistantMessage,
               sources,
+              queryId,
             },
           ];
         }
@@ -608,6 +723,36 @@ function App() {
   }
 }
 
+  /* ──────────────────────────────────────────────────────────────
+     FEEDBACK
+  ────────────────────────────────────────────────────────────── */
+
+  async function handleFeedback(queryId, rating, index) {
+    if (!queryId) return;
+
+    // Optimistic UI update
+    setFeedbackRatings((prev) => ({ ...prev, [index]: rating }));
+
+    try {
+      const response = await fetch(`${API_URL}/feedback`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          query_id: Number(queryId),
+          rating: Number(rating),
+        }),
+      });
+
+      if (!response.ok) {
+        console.error('Failed to submit feedback');
+      }
+    } catch (error) {
+      console.error('Error submitting feedback:', error);
+    }
+  }
+
   /* ══════════════════════════════════════════════════════════════
      INITIALIZATION
      
@@ -694,46 +839,27 @@ function App() {
           }
         }
 
-       
-        const createResponse =
-          await fetch(
-            `${API_URL}/conversations`,
-            {
-              method: 'POST',
-            }
-          );
-
-        if (!createResponse.ok) {
-          throw new Error(
-            'Failed to create initial conversation'
-          );
+        /* --------------------------------------------------------
+           CASE 3:
+           No valid conversations found.
+           Create a brand new conversation on backend.
+        -------------------------------------------------------- */
+        const createdId = await createConversation(true);
+        if (createdId !== null) {
+          initialized.current = true;
         }
-
-        const createData =
-          await createResponse.json();
-
-        const newConversationId =
-          Number(
-            createData.conversation_id
-          );
-
-        setConversationId(
-          newConversationId
-        );
-
-        setMessages([]);
-
-        localStorage.setItem(
-          'conversationId',
-          String(newConversationId)
-        );
-
-        await loadHistory();
       } catch (error) {
         console.error(
           'Error initializing app:',
           error
         );
+        initialized.current = false;
+        // If backend was still starting up or loading weights, retry after 2.5s
+        setTimeout(() => {
+          if (!initialized.current) {
+            initializeApp();
+          }
+        }, 2500);
       }
     }
 
@@ -782,7 +908,127 @@ function App() {
   const hasMessages =
     messages.length > 0;
 
-  
+  const cleanHash = (hash || '').split('?')[0];
+
+  if (isLoading) {
+    return (
+      <div className="auth-container" style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+        <div className="auth-background">
+          <div className="auth-particles" />
+          <div className="auth-orbital" />
+        </div>
+        <div style={{ textAlign: 'center', zIndex: 1 }}>
+          <GeometricE />
+          <div style={{ marginTop: '16px', fontFamily: 'Plus Jakarta Sans', fontSize: '18px', fontWeight: 600, color: 'var(--text-primary)' }}>
+            ENSIASD AI Assistant
+          </div>
+          <div style={{ marginTop: '8px', fontSize: '13px', color: 'var(--text-tertiary)' }}>
+            Verifying academic session...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const isAdmin = isAdminUser(user);
+
+  if (cleanHash === '#login') {
+    if (isAuthenticated) {
+      window.location.hash = isAdmin ? '#admin' : '';
+      return null;
+    }
+    return (
+      <Login
+        onRegister={() => { window.location.hash = '#register'; }}
+        onForgotPassword={() => { window.location.hash = '#forgot-password'; }}
+        onLoginSuccess={(loggedInUser) => {
+          window.location.hash = isAdminUser(loggedInUser) ? '#admin' : '';
+        }}
+      />
+    );
+  }
+
+  if (cleanHash === '#register') {
+    if (isAuthenticated) {
+      window.location.hash = isAdmin ? '#admin' : '';
+      return null;
+    }
+    return (
+      <Register
+        onBackToLogin={() => { window.location.hash = '#login'; }}
+        onRegisterSuccess={() => { window.location.hash = '#login'; }}
+      />
+    );
+  }
+
+  if (cleanHash === '#forgot-password') {
+    return (
+      <ForgotPassword
+        onBackToLogin={() => { window.location.hash = '#login'; }}
+        onProceedToReset={(token) => {
+          window.location.hash = token ? `#reset-password?token=${encodeURIComponent(token)}` : '#reset-password';
+        }}
+      />
+    );
+  }
+
+  if (cleanHash === '#reset-password') {
+    return (
+      <ResetPassword
+        onBackToLogin={() => { window.location.hash = '#login'; }}
+        onResetSuccess={() => { window.location.hash = '#login'; }}
+      />
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <Login
+        onRegister={() => { window.location.hash = '#register'; }}
+        onForgotPassword={() => { window.location.hash = '#forgot-password'; }}
+        onLoginSuccess={(loggedInUser) => {
+          window.location.hash = isAdminUser(loggedInUser) ? '#admin' : '';
+        }}
+      />
+    );
+  }
+
+  // Account & Profile settings (accessible by both admins and normal users)
+  if (cleanHash === '#account' || cleanHash === '#profile') {
+    return (
+      <AccountSettings
+        onSignOut={async () => {
+          await logout();
+          window.location.hash = '#login';
+        }}
+        onBackToChat={() => {
+          window.location.hash = isAdmin ? '#admin' : '';
+        }}
+      />
+    );
+  }
+
+  // If user is ADMIN: Exclusively keep them on the Admin Interface
+  if (isAdmin) {
+    return (
+      <AdminPanel
+        user={user}
+        onLogout={async () => {
+          await logout();
+          window.location.hash = '#login';
+        }}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
+    );
+  }
+
+  // If NORMAL USER attempts to access #admin: Block access and redirect back to chatbot
+  if (cleanHash === '#admin' || cleanHash.startsWith('#admin')) {
+    window.location.hash = '';
+    return null;
+  }
+
   return (
     <div
       className={`app-shell ${
@@ -994,31 +1240,98 @@ function App() {
         {}
 
         <div className="sidebar-footer">
-          <div className="profile-card">
-
+          <div
+            className="profile-card"
+            onClick={() => {
+              window.location.hash = '#account';
+            }}
+            style={{ cursor: 'pointer' }}
+            title="My Profile / Account Settings"
+          >
             <div className="profile-avatar">
-              E
+              {user?.name
+                ? user.name
+                    .split(' ')
+                    .filter(Boolean)
+                    .map((n) => n[0])
+                    .slice(0, 2)
+                    .join('')
+                    .toUpperCase()
+                : 'E'}
             </div>
 
             {!sidebarCollapsed && (
               <div className="profile-copy">
                 <strong>
-                  ENSIASD Academic
+                  {user?.name || 'ENSIASD Academic'}
                 </strong>
 
                 <span>
-                  Institutional workspace
+                  {user?.role ? `${user.role.charAt(0).toUpperCase() + user.role.slice(1)} · Profile` : 'Institutional workspace'}
                 </span>
               </div>
             )}
 
             {!sidebarCollapsed && (
-              <span className="profile-menu">
+              <span className="profile-menu" title="Settings">
                 •••
               </span>
             )}
-
           </div>
+
+          {/* Admin link (Only shown for admin users) */}
+          {isAdmin && (
+            <a
+              href="#admin"
+              className="sidebar-item"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                margin: '6px 0 0',
+                padding: '8px 12px',
+                borderRadius: 8,
+                textDecoration: 'none',
+                color: 'var(--text-quaternary)',
+                fontSize: '0.78rem',
+                transition: 'color 0.2s, background 0.2s',
+              }}
+              title="Admin Panel"
+            >
+              <ShieldCheck size={14} />
+              {!sidebarCollapsed && <span>Admin Panel</span>}
+            </a>
+          )}
+
+          {/* Sign out button */}
+          <button
+            type="button"
+            onClick={async () => {
+              await logout();
+              window.location.hash = '#login';
+            }}
+            className="sidebar-item"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              margin: '4px 0 0',
+              padding: '8px 12px',
+              borderRadius: 8,
+              border: 'none',
+              background: 'transparent',
+              width: '100%',
+              textAlign: 'left',
+              color: 'var(--text-quaternary)',
+              fontSize: '0.78rem',
+              cursor: 'pointer',
+              transition: 'color 0.2s, background 0.2s',
+            }}
+            title="Sign Out"
+          >
+            <ChevronDown style={{ transform: 'rotate(-90deg)' }} size={13} />
+            {!sidebarCollapsed && <span>Sign Out</span>}
+          </button>
         </div>
       </aside>
 
@@ -1151,6 +1464,56 @@ function App() {
                       Academic
                     </span>
 
+                  </div>
+
+                  <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowSettings(false);
+                        window.location.hash = '#account';
+                      }}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        padding: '6px 8px',
+                        background: 'rgba(255,255,255,0.04)',
+                        border: '1px solid var(--border)',
+                        borderRadius: '6px',
+                        color: 'var(--text-primary)',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                      }}
+                    >
+                      <Settings size={13} />
+                      My Profile & Settings
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setShowSettings(false);
+                        await logout();
+                        window.location.hash = '#login';
+                      }}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        padding: '6px 8px',
+                        background: 'rgba(248, 113, 113, 0.08)',
+                        border: '1px solid rgba(248, 113, 113, 0.25)',
+                        borderRadius: '6px',
+                        color: '#F87171',
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                        textAlign: 'left',
+                      }}
+                    >
+                      <ChevronDown style={{ transform: 'rotate(-90deg)' }} size={13} />
+                      Sign Out
+                    </button>
                   </div>
 
                 </div>
@@ -1453,6 +1816,48 @@ function App() {
                             />
                           </button>
 
+                          {message.role === 'assistant' && message.queryId && (
+                            <>
+                              <button
+                                className={`action-btn ${
+                                  feedbackRatings[index] === 1
+                                    ? 'feedback-positive'
+                                    : ''
+                                }`}
+                                onClick={() =>
+                                  handleFeedback(
+                                    message.queryId,
+                                    1,
+                                    index
+                                  )
+                                }
+                                aria-label="Good response"
+                                title="Helpful"
+                              >
+                                <ThumbsUp size={14} />
+                              </button>
+
+                              <button
+                                className={`action-btn ${
+                                  feedbackRatings[index] === 0
+                                    ? 'feedback-negative'
+                                    : ''
+                                }`}
+                                onClick={() =>
+                                  handleFeedback(
+                                    message.queryId,
+                                    0,
+                                    index
+                                  )
+                                }
+                                aria-label="Bad response"
+                                title="Not helpful"
+                              >
+                                <ThumbsDown size={14} />
+                              </button>
+                            </>
+                          )}
+
                         </div>
                       )}
 
@@ -1558,4 +1963,10 @@ function App() {
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
+  );
+}
