@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import html2pdf from 'html2pdf.js';
 
 import {
@@ -1686,9 +1687,9 @@ function AppContent() {
 
                       <div className="message-bubble">
 
-                        <ReactMarkdown>
-                          {message.content}
-                        </ReactMarkdown>
+                       <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {message.content}
+                      </ReactMarkdown>
 
                         {message.role ===
                           'assistant' &&

@@ -1,4 +1,5 @@
 import json
+import re
 
 
 class RAGChatbot:
@@ -101,6 +102,91 @@ Standalone search query:"""
 
         return search_query, reranked_results
 
+    #MODIFICATION
+
+    @staticmethod
+    def is_abstention(answer):
+        text = (answer or "").lower()
+        return (
+            "information non disponible" in text
+            or "i don't have enough information" in text
+        )
+
+    @staticmethod
+    def source_label(result):
+        metadata = result[4] if isinstance(result[4], dict) else {}
+        page = metadata.get("page")
+        return str(result[3]) + (f" - Page {page}" if page else "")
+
+    def build_sources(self, reranked_results, answer):
+        """Only the sources the answer was really written from."""
+        if (
+            not reranked_results
+            or not (answer or "").strip()
+            or self.is_abstention(answer)
+        ):
+            return []
+
+        blocks = "\n\n".join(
+            f"[{i}] ({self.source_label(r)})\n{r[1]}"
+            for i, r in enumerate(reranked_results, start=1)
+        )
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You check which CONTEXT blocks were actually used to write an ANSWER. "
+                    "Return ONLY a JSON array with the numbers of the blocks whose content "
+                    "directly supports facts stated in the ANSWER, for example [2,5]. "
+                    "Do not include blocks that are merely related or unused. "
+                    "Return [] if the ANSWER is a greeting, a refusal, says the information "
+                    "is unavailable, or uses no block."
+                )
+            },
+            {
+                "role": "user",
+                "content": f"CONTEXT:\n\n{blocks}\n\nANSWER:\n\n{answer}"
+            }
+        ]
+
+        used = None
+        try:
+            raw = self.llm_client.generate(messages)
+            match = re.search(r"\[[\d,\s]*\]", raw or "")
+            if match:
+                used = json.loads(match.group(0))
+        except Exception:
+            used = None
+
+        if used is None:
+            best = max(reranked_results, key=lambda r: r[2])
+            return [self.source_label(best)]
+
+        sources = []
+        for i in used:
+            if isinstance(i, int) and 1 <= i <= len(reranked_results):
+                label = self.source_label(reranked_results[i - 1])
+                if label not in sources:
+                    sources.append(label)
+
+        return sources
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     def build_context(self, reranked_results):
         context_parts = []
         for result in reranked_results:
@@ -192,11 +278,8 @@ QUESTION:
         )
 
         answer = self.llm_client.generate(messages)
+        sources = self.build_sources(reranked_results, answer)
 
-        sources = [
-            f"{result[3]} - Page {result[4].get('page')}"
-            for result in reranked_results
-        ]
 
         self.conversation[conversation_id].append({
             "role": "user",
@@ -279,10 +362,9 @@ QUESTION:
                 "content": chunk
             }) + "\n"
 
-        sources = [
-            f"{result[3]} - Page {result[4].get('page')}"
-            for result in reranked_results
-        ]
+        sources = self.build_sources(reranked_results, answer)
+
+
 
         yield json.dumps({
             "type": "sources",
