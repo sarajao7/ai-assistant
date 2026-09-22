@@ -298,6 +298,64 @@ class Database:
         conn.close()
         return results
 
+    def search_exact(self, codes=None, names=None, top_k=40):
+        """
+        Exact channel driven by the metadata tags written by ingest.py.
+        codes and names are OR-ed: a chunk matching either family is kept.
+        """
+        codes = [c for c in (codes or []) if c]
+        names = [n for n in (names or []) if n]
+
+        if not codes and not names:
+            return []
+
+        any_sql = []
+        any_params = []
+
+        for code in codes:
+            base = code.split("_")[0]
+
+            any_sql.append(
+                "(metadata->>'module_code' = %s"
+                " OR metadata->>'element_code' = %s"
+                " OR content ~* %s)"
+            )
+            any_params.extend([
+                base,
+                code,
+                r"\y" + re.escape(code) + r"\y"
+            ])
+
+        for name in names:
+            any_sql.append("content ~* %s")
+            any_params.append(
+                r"\y" + r"\W+".join(re.escape(p) for p in name.split()) + r"\y"
+            )
+
+        sql = f"""
+        SELECT id, content, 1.0 AS exact_score, source, metadata
+        FROM chunks
+        WHERE {' OR '.join(any_sql)}
+        ORDER BY source NULLS LAST, id
+        LIMIT %s;
+        """
+
+        params = any_params + [top_k]
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        try:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        finally:
+            cur.close()
+            conn.close()
+
+        return [
+            (row[0], row[1], float(row[2]), row[3], row[4] or {})
+            for row in rows
+        ]
+
     def reciprocal_rank_fusion(self, dense_results, sparse_results, top_k=30):
         k = 60
         rrf_scores = {}

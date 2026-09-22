@@ -1,6 +1,115 @@
 import json
 import re
 
+ABSTENTION_MESSAGE = "Information non disponible dans les documents fournis."
+
+CODE_RE = re.compile(r"\b(M\d{3}(?:[_\-.]\d+)?)\b", re.IGNORECASE)
+
+FILIERE_RE = re.compile(r"\b(MGSI|SDBDIA|SITCN|IL|ENSIASD)\b")
+
+SEMESTER_RE = re.compile(r"\bS([1-8])\b")
+
+PROF_CUE_RE = re.compile(
+    r"\b(?:professeure?s?|prof\.?|pr\.|enseign[ée]e?s?\s+par|enseignant(?:e)?s?|"
+    r"responsable(?:\s+du\s+module)?|coordinat(?:eur|rice)|intervenant(?:e)?s?)"
+    r"[\s:]+",
+    re.IGNORECASE
+)
+
+NAME_BLOCK_RE = re.compile(r"(?:[A-ZÀ-ÖØ-Þ][\w'’\-]*\s+){0,3}[A-ZÀ-ÖØ-Þ][\w'’\-]*")
+
+TITLE_PREFIX_RE = re.compile(r"^(?:Pr|Prof|Dr|Mme|Mlle|M)\.?\s+", re.IGNORECASE)
+
+CALENDAR_WORDS = (
+    "calendrier", "date", "dates", "examen", "examens", "épreuve", "epreuve",
+    "épreuves", "rattrapage", "rattrapages", "session", "planning"
+)
+
+SYLLABUS_WORDS = (
+    "évaluation", "evaluation", "modalité", "modalités", "contrôle continu",
+    "controle continu", "pondération", "ects", "crédit", "crédits", "credits",
+    "volume horaire", "contenu", "programme", "prérequis", "prerequis",
+    "compétence", "objectif", "sujet", "sujets"
+)
+
+TOTAL_WORDS = (
+    "total", "totale", "totaux", "somme", "cumul",
+    "combien d'heures", "nombre d'heures"
+)
+
+
+def extract_names(text):
+    """Professor names introduced by an explicit cue word."""
+    names = []
+
+    for cue in PROF_CUE_RE.finditer(text or ""):
+        candidate = text[cue.end():]
+
+        for _ in range(2):
+            match = NAME_BLOCK_RE.match(candidate)
+
+            if not match:
+                break
+
+            token = match.group(0).strip()
+            rest = candidate[len(match.group(0)):].lstrip()
+
+            if TITLE_PREFIX_RE.match(token) and rest:
+                candidate = rest
+                continue
+
+            break
+
+        match = NAME_BLOCK_RE.match(candidate)
+
+        if not match:
+            continue
+
+        name = match.group(0).strip()
+
+        if CODE_RE.search(name) or any(ch.isdigit() for ch in name):
+            continue
+
+        tokens = name.split()
+
+        if len(tokens) < 2 and (len(name) < 4 or not name.isupper()):
+            continue
+
+        if name.upper() not in {n.upper() for n in names}:
+            names.append(name)
+
+    return names
+
+
+def analyze_query(text):
+    """Regex-only analysis of the RAW question (never of the rewritten one)."""
+    raw = text or ""
+    lowered = raw.lower()
+
+    codes = []
+
+    for match in CODE_RE.finditer(raw):
+        code = re.sub(r"[-.]", "_", match.group(1).upper())
+
+        if code not in codes:
+            codes.append(code)
+
+    filiere_match = FILIERE_RE.search(raw)
+    semester_match = SEMESTER_RE.search(raw)
+    names = extract_names(raw)
+
+    return {
+        "codes": codes,
+        "names": names,
+        "filiere": filiere_match.group(1) if filiere_match else None,
+        "semester": f"S{semester_match.group(1)}" if semester_match else None,
+        "is_aggregation": bool(names) and any(w in lowered for w in TOTAL_WORDS),
+        "is_multidoc": (
+            any(w in lowered for w in CALENDAR_WORDS)
+            and any(w in lowered for w in SYLLABUS_WORDS)
+        ),
+    }
+
 
 class RAGChatbot:
 
@@ -70,18 +179,36 @@ Standalone search query:"""
 
         return user_input
 
-    def retrieve(self, user_input, conversation_id):
+    def retrieve(self, user_input, conversation_id, analysis=None):
+        analysis = analysis or analyze_query(user_input)
+
         search_query = self.rewrite_query(
             user_input,
             conversation_id
         )
 
-        query_embedding = self.embedder.get_embedding(
-            search_query
-        )
+        codes = analysis["codes"]
+        names = analysis["names"]
+
+        if len(codes) == 1 and not analysis["is_multidoc"]:
+            exact_results = self.database.search_exact(
+                codes=codes,
+                names=names,
+                top_k=40
+            )
+
+            if exact_results:
+                return search_query, self.reranker.rerank(
+                    search_query,
+                    exact_results,
+                    top_k=8
+                )
+
+
+        query_embedding = self.embedder.get_embedding(search_query)
 
         dense_results = self.database.dense_search(
-            query_embedding,            
+            query_embedding,
             top_k=30
         )
         sparse_results = self.database.sparse_search(
@@ -94,13 +221,30 @@ Standalone search query:"""
             sparse_results,
             top_k=30
         )
-        reranked_results = self.reranker.rerank(
+
+        if codes or names:
+            exact_results = self.database.search_exact(
+                codes=codes,
+                names=names,
+                top_k=40
+            )
+
+            seen = {r[0] for r in exact_results}
+            candidates = exact_results + [
+                r for r in fused_results if r[0] not in seen
+            ]
+
+            return search_query, self.reranker.rerank(
+                search_query,
+                candidates,
+                top_k=8
+            )
+
+        return search_query, self.reranker.rerank(
             search_query,
             fused_results,
             top_k=8
         )
-
-        return search_query, reranked_results
 
     #MODIFICATION
 
@@ -111,6 +255,48 @@ Standalone search query:"""
             "information non disponible" in text
             or "i don't have enough information" in text
         )
+
+    @staticmethod
+    def normalize_text(text):
+        text = (text or "").replace("\u00a0", " ")
+        return re.sub(r"\s+", " ", text.lower()).strip()
+
+    def has_evidence(self, analysis, results):
+        """
+        True when every code and professor name mentioned in the question really
+        appears in what we retrieved. Blocks answers about a similar module.
+        """
+        if not results:
+            return False
+
+        if not analysis:
+            return True
+
+        codes = analysis.get("codes") or []
+        names = analysis.get("names") or []
+
+        if not codes and not names:
+            return True
+
+        blob = self.normalize_text(
+            "\n".join(result[1] or "" for result in results)
+        )
+
+        for code in codes:
+            variants = {
+                code.lower(),
+                code.lower().replace("_", "-"),
+                code.lower().replace("_", ".")
+            }
+
+            if not any(variant in blob for variant in variants):
+                return False
+
+        for name in names:
+            if self.normalize_text(name) not in blob:
+                return False
+
+        return True
 
     @staticmethod
     def source_label(result):
@@ -216,7 +402,7 @@ Rules:
 2. Do not use outside knowledge.
 3. Do not invent, assume, infer, or complete missing information.
 4. If the CONTEXT does not contain enough information, respond exactly:
-"I don't have enough information to answer this question based on the available documents."
+"Information non disponible dans les documents fournis."
 5. If multiple retrieved chunks are relevant, combine their information to provide the most complete answer.
 6. Give priority to the most relevant and specific information in the CONTEXT.
 7. Preserve important conditions, exceptions, dates, numbers, names, and requirements exactly as supported by the CONTEXT.
@@ -257,18 +443,16 @@ QUESTION:
 
             return answer, []
 
+        analysis = analyze_query(user_input)
+
         search_query, reranked_results = self.retrieve(
             user_input,
-            conversation_id
+            conversation_id,
+            analysis=analysis
         )
 
-        if not reranked_results:
-            answer = (
-                "I don't have enough information to answer this question "
-                "based on the available documents."
-            )
-
-            return answer, []
+        if not self.has_evidence(analysis, reranked_results):
+            return ABSTENTION_MESSAGE, []
 
         context = self.build_context(reranked_results)
 
@@ -322,20 +506,18 @@ QUESTION:
 
             return
 
+        analysis = analyze_query(user_input)
+
         search_query, reranked_results = self.retrieve(
             user_input,
-            conversation_id
+            conversation_id,
+            analysis=analysis
         )
 
-        if not reranked_results:
-            answer = (
-                "I don't have enough information to answer this question "
-                "based on the available documents."
-            )
-
+        if not self.has_evidence(analysis, reranked_results):
             yield json.dumps({
                 "type": "chunk",
-                "content": answer
+                "content": ABSTENTION_MESSAGE
             }) + "\n"
 
             yield json.dumps({
