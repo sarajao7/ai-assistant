@@ -70,6 +70,41 @@ def detect_module_code(text):
 
     return None
 
+def split_module_code(code):
+    """M115_2 -> ("M115", "M115_2");  M111 -> ("M111", None)."""
+    if not code:
+        return None, None
+    base = code.split("_")[0]
+    return base, (code if code != base else None)
+
+CODE_LABEL_RE = re.compile(
+    r"^(?:N[°o]\s*d['’]ordre\s*du\s*module|code\s*du\s*module)\s*[:.\s]*"
+    r"(M\d{3}(?:[_\-.]\d+)?)",
+    re.IGNORECASE
+)
+CODE_LINE_START_RE = re.compile(
+    r"^(M\d{3}(?:[_\-.]\d+)?)\b",
+    re.IGNORECASE
+)
+CODE_TAIL_RE = re.compile(r"^\s*(?:[:|–—-]|$)")
+def detect_defined_module_code(line):
+
+    if not line:
+        return None
+    match = CODE_LABEL_RE.match(line)
+    if match:
+        return re.sub(r"[-.]", "_", match.group(1).upper())
+    match = CODE_LINE_START_RE.match(line)
+    if match:
+        return re.sub(r"[-.]", "_", match.group(1).upper())
+    if re.search(r"\bmodule\b", line, re.IGNORECASE) and len(line) <= 120:
+        match = re.search(r"\b(M\d{3}(?:[_\-.]\d+)?)\b", line, re.IGNORECASE)
+        if match and not re.search(r"[:;.]", line[:match.start()]):
+            tail = line[match.end():]
+            if CODE_TAIL_RE.match(tail) or tail.isupper():
+                return re.sub(r"[-.]", "_", match.group(1).upper())
+    return None
+
 
 def detect_module_title(text):
     if not text:
@@ -133,24 +168,30 @@ def extract_page_module_context(page_text):
     context = {}
 
     m_code = re.search(
-        r"(?:N[°o]\s*d['’]ordre\s*du\s*module|Code\s*du\s*module)[\s\S]{0,50}?\b(M\d{3}(?:[_\-.]\d+)?)\b",
+        r"(?:N[°o]\s*d['’]ordre\s*du\s*module|Code\s*du\s*module)[\s\S]{0,50}?"
+        r"\b(M\d{3}(?:[_\-.]\d+)?)\b",
         page_text,
         flags=re.IGNORECASE
-    )
-
+        )
     if m_code:
-        code = m_code.group(1).upper()
-        context["module_code"] = re.sub(r"[-.]", "_", code)
+        code = re.sub(r"[-.]", "_", m_code.group(1).upper())
+        base, element = split_module_code(code)
+        context["module_code"] = base
+        if element:
+            context["element_code"] = element
     else:
         m_code_fallback = re.search(
+            r"DESCRIPTI(?:F|ON)(?:\s+DU\s+CONTENU)?\s+DU\s+MODULE[\s\S]{0,150}?"
             r"\b(M\d{3}(?:[_\-.]\d+)?)\b",
             page_text,
             flags=re.IGNORECASE
         )
-
-        if m_code_fallback and "DESCRIPTIF DU MODULE" in page_text.upper():
-            code = m_code_fallback.group(1).upper()
-            context["module_code"] = re.sub(r"[-.]", "_", code)
+        if m_code_fallback:
+            code = re.sub(r"[-.]", "_", m_code_fallback.group(1).upper())
+            base, element = split_module_code(code)
+            context["module_code"] = base
+            if element:
+                context["element_code"] = element
 
     m_title = re.search(
         r"Intitul[ée]\s*(?:du\s*module|Module)?\s*[:\s]*([^\n\r]+)",
@@ -188,6 +229,7 @@ def build_context_header(
     filiere=None,
     semester=None,
     module_code=None,
+    element_code=None,
     module_title=None,
     heading=None
 ):
@@ -206,6 +248,9 @@ def build_context_header(
             parts.append(f"Module: {module_code}")
     elif module_title:
         parts.append(f"Module: {module_title}")
+
+    if element_code:
+        parts.append(f"Élément: {element_code}")
 
     if heading:
         parts.append(f"Section: {heading}")
@@ -443,6 +488,7 @@ def build_document_chunks(
     current_filiere = doc_filiere
     current_semester = doc_semester
     current_module_code = None
+    current_element_code = None
     current_module_title = None
     current_heading = None
 
@@ -456,7 +502,15 @@ def build_document_chunks(
         page_ctx = extract_page_module_context(page_text)
 
         if "module_code" in page_ctx:
-            current_module_code = page_ctx["module_code"]
+            new_base = page_ctx["module_code"]
+
+            if new_base != current_module_code:
+                current_element_code = None
+
+            current_module_code = new_base
+
+        if "element_code" in page_ctx:
+            current_element_code = page_ctx["element_code"]
 
         if "module_title" in page_ctx:
             current_module_title = page_ctx["module_title"]
@@ -482,18 +536,18 @@ def build_document_chunks(
                 ):
                     current_semester = detected_sem
 
-            detected_code = detect_module_code(clean)
+            defined_code = detect_defined_module_code(clean)
 
-            if detected_code:
-                if (
-                    "module" in clean.lower()
-                    or re.match(
-                        r"^M\d{3}(?:[_\-.]\d+)?\b",
-                        clean,
-                        re.IGNORECASE
-                    )
-                ):
-                    current_module_code = detected_code
+            if defined_code:
+                base, element = split_module_code(defined_code)
+
+                if base != current_module_code:
+                    current_element_code = None
+
+                current_module_code = base
+
+                if element:
+                    current_element_code = element
 
             detected_title = detect_module_title(clean)
 
@@ -511,6 +565,7 @@ def build_document_chunks(
                 "filiere": current_filiere,
                 "semester": current_semester,
                 "module_code": current_module_code,
+                "element_code": current_element_code,      # NEW
                 "module_title": current_module_title,
                 "heading": current_heading
             })
@@ -526,7 +581,16 @@ def build_document_chunks(
     for item in all_lines:
         line_len = len(item["text"])
 
-        if current_items and current_length + line_len + 1 > chunk_size:
+        module_changed = (
+            bool(current_items)
+            and item["module_code"] is not None
+            and current_items[-1]["module_code"] is not None
+            and item["module_code"] != current_items[-1]["module_code"]
+        )
+        if current_items and (
+            current_length + line_len + 1 > chunk_size
+            or module_changed
+        ):
             raw_content = "\n".join(
                 i["text"] for i in current_items
             ).strip()
@@ -547,6 +611,11 @@ def build_document_chunks(
                     None
                 )
 
+                c_element = next(
+                    (i["element_code"] for i in current_items if i["element_code"]),
+                    None
+                )
+
                 c_title = next(
                     (i["module_title"] for i in current_items if i["module_title"]),
                     None
@@ -561,6 +630,7 @@ def build_document_chunks(
                     filiere=c_filiere,
                     semester=c_sem,
                     module_code=c_code,
+                    element_code=c_element,
                     module_title=c_title,
                     heading=c_heading
                 )
@@ -580,20 +650,24 @@ def build_document_chunks(
                     "filiere": c_filiere,
                     "semester": c_sem,
                     "module_code": c_code,
+                    "element_code": c_element,
                     "heading": c_heading
                 })
+
+
 
             overlap_items = []
             overlap_len = 0
 
-            for prev in reversed(current_items):
-                p_len = len(prev["text"]) + 1
+            if not module_changed:
+                for prev in reversed(current_items):
+                    p_len = len(prev["text"]) + 1
 
-                if overlap_len + p_len > overlap:
-                    break
+                    if overlap_len + p_len > overlap:
+                        break
 
-                overlap_items.insert(0, prev)
-                overlap_len += p_len
+                    overlap_items.insert(0, prev)
+                    overlap_len += p_len
 
             current_items = overlap_items
             current_length = sum(
@@ -628,6 +702,11 @@ def build_document_chunks(
                 None
             )
 
+            c_element = next(
+                (i["element_code"] for i in current_items if i["element_code"]),
+                None
+            )
+
             c_title = next(
                 (i["module_title"] for i in current_items if i["module_title"]),
                 None
@@ -642,6 +721,7 @@ def build_document_chunks(
                 filiere=c_filiere,
                 semester=c_sem,
                 module_code=c_code,
+                element_code=c_element,
                 module_title=c_title,
                 heading=c_heading
             )
@@ -661,6 +741,7 @@ def build_document_chunks(
                 "filiere": c_filiere,
                 "semester": c_sem,
                 "module_code": c_code,
+                "element_code": c_element,
                 "heading": c_heading
             })
 
@@ -687,6 +768,7 @@ def build_embedding_text(
     filiere = chunk.get("filiere")
     semester = chunk.get("semester")
     module_code = chunk.get("module_code")
+    element_code = chunk.get("element_code")
     heading = chunk.get("heading")
 
     if filiere:
@@ -697,6 +779,9 @@ def build_embedding_text(
 
     if module_code:
         meta_parts.append(f"Module: {module_code}")
+
+    if element_code:
+        meta_parts.append(f"Élément: {element_code}")
 
     if heading:
         meta_parts.append(f"Section: {heading}")
@@ -776,6 +861,7 @@ def ingest_file(file_path):
             "filiere": chunk["filiere"],
             "semester": chunk["semester"],
             "module_code": chunk["module_code"],
+            "element_code": chunk["element_code"],      # NEW
             "heading": chunk["heading"]
         }
 
