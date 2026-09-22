@@ -181,7 +181,7 @@ def extract_page_module_context(page_text):
             context["element_code"] = element
     else:
         m_code_fallback = re.search(
-            r"DESCRIPTIF\s+DU\s+MODULE[\s\S]{0,150}?"
+            r"DESCRIPTI(?:F|ON)(?:\s+DU\s+CONTENU)?\s+DU\s+MODULE[\s\S]{0,150}?"
             r"\b(M\d{3}(?:[_\-.]\d+)?)\b",
             page_text,
             flags=re.IGNORECASE
@@ -229,7 +229,7 @@ def build_context_header(
     filiere=None,
     semester=None,
     module_code=None,
-    element_code=None,          
+    element_code=None,
     module_title=None,
     heading=None
 ):
@@ -488,7 +488,7 @@ def build_document_chunks(
     current_filiere = doc_filiere
     current_semester = doc_semester
     current_module_code = None
-    current_element_code = None  
+    current_element_code = None
     current_module_title = None
     current_heading = None
 
@@ -537,13 +537,17 @@ def build_document_chunks(
                     current_semester = detected_sem
 
             defined_code = detect_defined_module_code(clean)
+
             if defined_code:
                 base, element = split_module_code(defined_code)
-            if base != current_module_code:
+
+                if base != current_module_code:
                     current_element_code = None
-                    current_module_code = base
-            if element:
-                    current_element_code = element  
+
+                current_module_code = base
+
+                if element:
+                    current_element_code = element
 
             detected_title = detect_module_title(clean)
 
@@ -626,7 +630,7 @@ def build_document_chunks(
                     filiere=c_filiere,
                     semester=c_sem,
                     module_code=c_code,
-                    element_code=c_element,          
+                    element_code=c_element,
                     module_title=c_title,
                     heading=c_heading
                 )
@@ -655,14 +659,15 @@ def build_document_chunks(
             overlap_items = []
             overlap_len = 0
 
-            for prev in reversed(current_items):
-                p_len = len(prev["text"]) + 1
+            if not module_changed:
+                for prev in reversed(current_items):
+                    p_len = len(prev["text"]) + 1
 
-                if overlap_len + p_len > overlap:
-                    break
+                    if overlap_len + p_len > overlap:
+                        break
 
-                overlap_items.insert(0, prev)
-                overlap_len += p_len
+                    overlap_items.insert(0, prev)
+                    overlap_len += p_len
 
             current_items = overlap_items
             current_length = sum(
