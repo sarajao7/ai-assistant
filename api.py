@@ -199,11 +199,9 @@ def history_conversation(id: int):
 
 @app.post("/conversations")
 def create_conversation():
-    conversation_id = chatbot.next_conversation_id
+    conversation_id = database.create_conversation_row()
 
     chatbot.conversation[conversation_id] = []
-
-    chatbot.next_conversation_id += 1
 
     return {
         "conversation_id": conversation_id

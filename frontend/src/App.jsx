@@ -17,6 +17,7 @@ import {
   Plus,
   MessageSquare,
   ChevronDown,
+  ChevronUp,
   Send,
   ExternalLink,
   BookOpen,
@@ -187,6 +188,11 @@ function AppContent() {
   const [sidebarCollapsed, setSidebarCollapsed] =
     useState(false);
 
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchActiveIndex, setSearchActiveIndex] = useState(0);
+  const searchInputRef = useRef(null);
+
   const initialized = useRef(false);
 
   /* ──────────────────────────────────────────────────────────────
@@ -219,6 +225,14 @@ function AppContent() {
         event.key.toLowerCase() === 'k'
       ) {
         event.preventDefault();
+        setShowSearch(true);
+      }
+
+      if (
+        event.key === 'Escape' &&
+        showSearch
+      ) {
+        closeSearch();
       }
 
       if (
@@ -241,7 +255,100 @@ function AppContent() {
         handleGlobalKeyDown
       );
     };
-  }, []);
+  }, [showSearch]);
+
+  useEffect(() => {
+    if (showSearch && searchInputRef.current) {
+      searchInputRef.current.focus();
+    }
+  }, [showSearch]);
+
+  function closeSearch() {
+    setShowSearch(false);
+    setSearchQuery('');
+    setSearchActiveIndex(0);
+  }
+
+  function getSearchMatches(query) {
+    const normalized = query.trim().toLowerCase();
+
+    if (!normalized) {
+      return [];
+    }
+
+    return messages.reduce((matches, message, index) => {
+      if (
+        message.content &&
+        message.content.toLowerCase().includes(normalized)
+      ) {
+        matches.push(index);
+      }
+
+      return matches;
+    }, []);
+  }
+
+  function scrollToMessage(messageIndex) {
+    const target = document.getElementById(
+      `message-${messageIndex}`
+    );
+
+    if (!target) {
+      return;
+    }
+
+    target.scrollIntoView({
+      behavior: 'smooth',
+      block: 'center',
+    });
+
+    target.classList.add('search-highlight');
+
+    setTimeout(() => {
+      target.classList.remove('search-highlight');
+    }, 1500);
+  }
+
+  const searchMatches = getSearchMatches(searchQuery);
+
+  function goToSearchMatch(position) {
+    if (!searchMatches.length) {
+      return;
+    }
+
+    const wrapped =
+      ((position % searchMatches.length) +
+        searchMatches.length) %
+      searchMatches.length;
+
+    setSearchActiveIndex(wrapped);
+    scrollToMessage(searchMatches[wrapped]);
+  }
+
+  function handleSearchInputChange(event) {
+    const value = event.target.value;
+    setSearchQuery(value);
+
+    const matches = getSearchMatches(value);
+
+    if (matches.length) {
+      setSearchActiveIndex(0);
+      scrollToMessage(matches[0]);
+    }
+  }
+
+  function handleSearchKeyDown(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      goToSearchMatch(
+        event.shiftKey
+          ? searchActiveIndex - 1
+          : searchActiveIndex + 1
+      );
+    } else if (event.key === 'Escape') {
+      closeSearch();
+    }
+  }
 
   /* ──────────────────────────────────────────────────────────────
      LOAD HISTORY
@@ -1390,17 +1497,89 @@ function AppContent() {
               {currentConversationTitle}
             </span>
 
-            <button
-              className="icon-button search-trigger"
-              aria-label="Search"
-              title="Search (⌘K)"
-            >
-              <Search size={16} />
+            <div className="search-wrap">
 
-              <span className="kbd-hint">
-                ⌘K
-              </span>
-            </button>
+              <button
+                className="icon-button search-trigger"
+                onClick={() =>
+                  showSearch
+                    ? closeSearch()
+                    : setShowSearch(true)
+                }
+                aria-label="Search"
+                title="Search (⌘K)"
+              >
+                <Search size={16} />
+
+                <span className="kbd-hint">
+                  ⌘K
+                </span>
+              </button>
+
+              {showSearch && (
+                <div className="search-popover">
+
+                  <div className="search-input-row">
+
+                    <Search size={14} />
+
+                    <input
+                      ref={searchInputRef}
+                      type="text"
+                      value={searchQuery}
+                      onChange={handleSearchInputChange}
+                      onKeyDown={handleSearchKeyDown}
+                      placeholder="Search this conversation..."
+                    />
+
+                  </div>
+
+                  {searchQuery.trim() && (
+                    <div className="search-results-row">
+
+                      <span>
+                        {searchMatches.length
+                          ? `${searchActiveIndex + 1} of ${searchMatches.length}`
+                          : 'No matches'}
+                      </span>
+
+                      {searchMatches.length > 0 && (
+                        <div className="search-nav-buttons">
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              goToSearchMatch(
+                                searchActiveIndex - 1
+                              )
+                            }
+                            aria-label="Previous match"
+                          >
+                            <ChevronUp size={13} />
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              goToSearchMatch(
+                                searchActiveIndex + 1
+                              )
+                            }
+                            aria-label="Next match"
+                          >
+                            <ChevronDown size={13} />
+                          </button>
+
+                        </div>
+                      )}
+
+                    </div>
+                  )}
+
+                </div>
+              )}
+
+            </div>
 
             <button
               className="icon-button theme-toggle"
@@ -1661,6 +1840,7 @@ function AppContent() {
                         : 'assistant-row'
                     }`}
                     key={index}
+                    id={`message-${index}`}
                   >
 
                     <div className="message-avatar">
@@ -1916,17 +2096,6 @@ function AppContent() {
             <div className="composer-bottom">
 
               <div className="composer-tools">
-
-                <button
-                  className="composer-tool"
-                  type="button"
-                >
-                  <Upload size={12} />
-
-                  <span>
-                    Academic context
-                  </span>
-                </button>
 
                 <span className="composer-hint">
                   Enter to send · Shift + Enter

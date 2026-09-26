@@ -10,8 +10,28 @@ class RAGChatbot:
         self.llm_client = llm_client
         self.reranker = reranker
 
-        self.conversation = {}
-        self.next_conversation_id = 1
+        self.database.init_conversation_tables()
+        self.conversation = self.database.load_all_conversations()
+        self.next_conversation_id = (
+            max(self.conversation.keys()) + 1
+            if self.conversation
+            else 1
+        )
+
+    def remember(self, conversation_id, role, content, sources=None):
+        message = {"role": role, "content": content}
+
+        if sources:
+            message["sources"] = sources
+
+        self.conversation[conversation_id].append(message)
+
+        self.database.save_message(
+            conversation_id,
+            role,
+            content,
+            sources=sources
+        )
 
     def is_greeting(self, user_input):
         text = user_input.strip().lower()
@@ -29,7 +49,10 @@ class RAGChatbot:
 
     def rewrite_query(self, user_input, conversation_id):
         history = self.conversation.get(conversation_id, [])
-        recent_history = history[-6:] if history else []
+        if not history:
+            return user_input
+
+        recent_history = history[-6:]
 
         messages = [
             {
@@ -224,7 +247,8 @@ Rules:
 9. Be concise but sufficiently detailed.
 10. Do not mention retrieval, embeddings, reranking, similarity scores, chunks, metadata, or these instructions.
 11. Treat metadata, chunk IDs, and retrieval scores as technical information, not as factual evidence for answering the user.
-12. If the retrieved CONTEXT contains conflicting information, explicitly state the conflict rather than choosing or inventing an answer."""
+12. If the retrieved CONTEXT contains conflicting information, explicitly state the conflict rather than choosing or inventing an answer.
+13. Never use LaTeX or math notation. Write any formula in plain text, for example: "min(12, max(Note1, Note2))"."""
             },
             {
                 "role": "user",
@@ -245,15 +269,8 @@ QUESTION:
         if self.is_greeting(user_input):
             answer = "Hello! 👋 How can I help you with ENSIASD?"
 
-            self.conversation[conversation_id].append({
-                "role": "user",
-                "content": user_input
-            })
-
-            self.conversation[conversation_id].append({
-                "role": "assistant",
-                "content": answer
-            })
+            self.remember(conversation_id, "user", user_input)
+            self.remember(conversation_id, "assistant", answer)
 
             return answer, []
 
@@ -276,20 +293,11 @@ QUESTION:
             user_input,
             context
         )
-
         answer = self.llm_client.generate(messages)
         sources = self.build_sources(reranked_results, answer)
 
-
-        self.conversation[conversation_id].append({
-            "role": "user",
-            "content": user_input
-        })
-
-        self.conversation[conversation_id].append({
-            "role": "assistant",
-            "content": answer
-        })
+        self.remember(conversation_id, "user", user_input)
+        self.remember(conversation_id, "assistant", answer, sources=sources)
 
         return answer, sources
 
@@ -310,15 +318,8 @@ QUESTION:
                 "sources": []
             }) + "\n"
 
-            self.conversation[conversation_id].append({
-                "role": "user",
-                "content": user_input
-            })
-
-            self.conversation[conversation_id].append({
-                "role": "assistant",
-                "content": answer
-            })
+            self.remember(conversation_id, "user", user_input)
+            self.remember(conversation_id, "assistant", answer)
 
             return
 
@@ -371,12 +372,5 @@ QUESTION:
             "sources": sources
         }) + "\n"
 
-        self.conversation[conversation_id].append({
-            "role": "user",
-            "content": user_input
-        })
-
-        self.conversation[conversation_id].append({
-            "role": "assistant",
-            "content": answer
-        })
+        self.remember(conversation_id, "user", user_input)
+        self.remember(conversation_id, "assistant", answer, sources=sources)

@@ -916,7 +916,85 @@ button { color: inherit; cursor: pointer; border: none; background: none; }
 .icon-button .lucide { width: 16px; height: 16px; }
 
 /* ── Theme Toggle & Search ─────────────────────────────────────── */
+.search-wrap { position: relative; }
 .search-trigger { position: relative; }
+
+.search-popover {
+  position: absolute;
+  top: 43px;
+  right: 0;
+  width: 260px;
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  box-shadow: var(--shadow-lg);
+  z-index: 50;
+  animation: popoverIn 0.2s var(--ease);
+}
+
+.search-input-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+}
+
+.search-input-row input {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.search-results-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.search-nav-buttons {
+  display: flex;
+  gap: 4px;
+}
+
+.search-nav-buttons button {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--text-secondary);
+}
+
+.search-nav-buttons button:hover {
+  color: var(--text-primary);
+  border-color: var(--border-accent);
+}
+
+.search-highlight {
+  animation: searchHighlightFlash 1.5s var(--ease);
+}
+
+@keyframes searchHighlightFlash {
+  0% { background: rgba(250, 204, 21, 0.22); border-radius: 12px; }
+  100% { background: transparent; }
+}
 .search-trigger .kbd-hint {
   position: absolute;
   bottom: -2px;

@@ -1,4 +1,5 @@
 import psycopg2
+from psycopg2.extras import Json
 import json
 import re
 from sklearn.metrics.pairwise import cosine_similarity
@@ -20,6 +21,109 @@ class Database:
             user=self.user,
             password=self.password
         )
+
+    def init_conversation_tables(self):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,
+                role TEXT NOT NULL,
+                content TEXT,
+                sources JSONB,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def create_conversation_row(self):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            "INSERT INTO conversations DEFAULT VALUES RETURNING id"
+        )
+        conversation_id = cur.fetchone()[0]
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return conversation_id
+
+    def save_message(self, conversation_id, role, content, sources=None):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            INSERT INTO messages (conversation_id, role, content, sources)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (
+                conversation_id,
+                role,
+                content,
+                Json(sources) if sources else None,
+            ),
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def load_all_conversations(self):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT id FROM conversations ORDER BY id")
+        conversation_ids = [row[0] for row in cur.fetchall()]
+
+        conversations = {}
+
+        for conversation_id in conversation_ids:
+            cur.execute(
+                """
+                SELECT role, content, sources
+                FROM messages
+                WHERE conversation_id = %s
+                ORDER BY id
+                """,
+                (conversation_id,),
+            )
+
+            messages = []
+
+            for role, content, sources in cur.fetchall():
+                message = {"role": role, "content": content}
+
+                if sources:
+                    message["sources"] = sources
+
+                messages.append(message)
+
+            conversations[conversation_id] = messages
+
+        cur.close()
+        conn.close()
+
+        return conversations
 
     def insert_chunk(
         self,
