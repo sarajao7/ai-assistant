@@ -33,6 +33,33 @@ ALGORITHM = "HS256"
 reset_tokens={}
 
 
+def get_current_user(token: str = Depends(oauth2_scheme)):
+
+    db = Database()
+
+    try:
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM]
+        )
+        user_id = int(payload["sub"])
+    except (JWTError, KeyError, ValueError):
+        raise HTTPException(
+            status_code=401,
+            detail="Session expired or invalid. Please log in again."
+        )
+
+    user = db.get_user_by_id(user_id)
+
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="User not found"
+        )
+
+    return user
+
 
 app = FastAPI()
 
@@ -74,7 +101,7 @@ def home():
 
 
 @app.post("/chat")
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, current_user = Depends(get_current_user)):
 
     if not request.question.strip():
         raise HTTPException(
@@ -83,6 +110,13 @@ def chat(request: ChatRequest):
         )
 
     if request.conversation_id not in chatbot.conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found"
+        )
+
+    owner_id = database.get_conversation_owner(request.conversation_id)
+    if owner_id != current_user[0]:
         raise HTTPException(
             status_code=404,
             detail="Conversation not found"
@@ -122,7 +156,7 @@ def chat(request: ChatRequest):
 
 
 @app.post("/chat/stream")
-def chat_stream(request: ChatRequest):
+def chat_stream(request: ChatRequest, current_user = Depends(get_current_user)):
 
     if not request.question.strip():
         raise HTTPException(
@@ -131,6 +165,13 @@ def chat_stream(request: ChatRequest):
         )
 
     if request.conversation_id not in chatbot.conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found"
+        )
+
+    owner_id = database.get_conversation_owner(request.conversation_id)
+    if owner_id != current_user[0]:
         raise HTTPException(
             status_code=404,
             detail="Conversation not found"
@@ -176,16 +217,29 @@ def chat_stream(request: ChatRequest):
 
 
 @app.get("/history")
-def history():
+def history(current_user = Depends(get_current_user)):
+    owned_ids = database.get_conversation_ids_for_user(current_user[0])
+
     return {
-        "history": chatbot.conversation
+        "history": {
+            str(conversation_id): chatbot.conversation[conversation_id]
+            for conversation_id in owned_ids
+            if conversation_id in chatbot.conversation
+        }
     }
 
 
 @app.get("/conversations/{id}")
-def history_conversation(id: int):
+def history_conversation(id: int, current_user = Depends(get_current_user)):
 
     if id not in chatbot.conversation:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found"
+        )
+
+    owner_id = database.get_conversation_owner(id)
+    if owner_id != current_user[0]:
         raise HTTPException(
             status_code=404,
             detail="Conversation not found"
@@ -198,8 +252,8 @@ def history_conversation(id: int):
 
 
 @app.post("/conversations")
-def create_conversation():
-    conversation_id = database.create_conversation_row()
+def create_conversation(current_user = Depends(get_current_user)):
+    conversation_id = database.create_conversation_row(current_user[0])
 
     chatbot.conversation[conversation_id] = []
 
@@ -783,28 +837,6 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
     }
 
 
-
-def get_current_user(token: str = Depends(oauth2_scheme)):
-
-    db = Database()
-
-    payload = jwt.decode(
-        token,
-        SECRET_KEY,
-        algorithms=[ALGORITHM]
-    )
-
-    user_id = int(payload["sub"])
-
-    user = db.get_user_by_id(user_id)
-
-    if not user:
-        raise HTTPException(
-            status_code=401,
-            detail="User not found"
-        )
-
-    return user
 
 @app.get("/auth/me")
 def get_my_account(current_user = Depends(get_current_user)):

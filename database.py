@@ -35,6 +35,16 @@ class Database:
             """
         )
 
+        # Migration-safe: ties every conversation to the user who owns it.
+        # Existing rows created before this column existed will have
+        # user_id = NULL and are treated as orphaned/inaccessible.
+        cur.execute(
+            """
+            ALTER TABLE conversations
+            ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id)
+            """
+        )
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
@@ -52,12 +62,13 @@ class Database:
         cur.close()
         conn.close()
 
-    def create_conversation_row(self):
+    def create_conversation_row(self, user_id):
         conn = self.get_connection()
         cur = conn.cursor()
 
         cur.execute(
-            "INSERT INTO conversations DEFAULT VALUES RETURNING id"
+            "INSERT INTO conversations (user_id) VALUES (%s) RETURNING id",
+            (user_id,)
         )
         conversation_id = cur.fetchone()[0]
 
@@ -66,6 +77,36 @@ class Database:
         conn.close()
 
         return conversation_id
+
+    def get_conversation_owner(self, conversation_id):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT user_id FROM conversations WHERE id = %s",
+            (conversation_id,)
+        )
+        row = cur.fetchone()
+
+        cur.close()
+        conn.close()
+
+        return row[0] if row else None
+
+    def get_conversation_ids_for_user(self, user_id):
+        conn = self.get_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT id FROM conversations WHERE user_id = %s ORDER BY id",
+            (user_id,)
+        )
+        conversation_ids = [row[0] for row in cur.fetchall()]
+
+        cur.close()
+        conn.close()
+
+        return conversation_ids
 
     def save_message(self, conversation_id, role, content, sources=None):
         conn = self.get_connection()

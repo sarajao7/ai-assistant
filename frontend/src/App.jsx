@@ -161,7 +161,36 @@ function useHash() {
 
 function AppContent() {
   const hash = useHash();
-  const { user, isAuthenticated, isLoading, logout } = useAuth();
+  const { user, isAuthenticated, isLoading, logout, token } = useAuth();
+
+  // Tracks which user the currently-loaded conversation state belongs to,
+  // so we can wipe it clean the moment a different account logs in.
+  const lastUserIdRef = useRef(null);
+
+  function authHeaders(extra = {}) {
+    return token
+      ? { ...extra, Authorization: `Bearer ${token}` }
+      : extra;
+  }
+
+  function resetConversationState() {
+    setConversationId(null);
+    setMessages([]);
+    setHistory({});
+    localStorage.removeItem('conversationId');
+  }
+
+  // Used by every "Sign Out" button. Clears the on-screen conversation
+  // state AND forces the init effect to run again from scratch on the
+  // next login (whether it's the same user or a different one) so
+  // nobody ever sees a stale/previous session's messages.
+  async function performSignOut() {
+    resetConversationState();
+    lastUserIdRef.current = null;
+    initialized.current = false;
+    await logout();
+    window.location.hash = '#login';
+  }
 
 
   const [input, setInput] = useState('');
@@ -356,7 +385,9 @@ function AppContent() {
 
   async function loadHistory() {
     try {
-      const response = await fetch(`${API_URL}/history`);
+      const response = await fetch(`${API_URL}/history`, {
+        headers: authHeaders(),
+      });
 
       if (!response.ok) {
         return {};
@@ -386,7 +417,10 @@ function AppContent() {
   async function loadConversation(id) {
     try {
       const response = await fetch(
-        `${API_URL}/conversations/${id}`
+        `${API_URL}/conversations/${id}`,
+        {
+          headers: authHeaders(),
+        }
       );
 
       if (!response.ok) {
@@ -440,6 +474,7 @@ function AppContent() {
         `${API_URL}/conversations`,
         {
           method: 'POST',
+          headers: authHeaders(),
         }
       );
 
@@ -519,6 +554,7 @@ function AppContent() {
 
           headers: {
             'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
           },
 
           body: JSON.stringify({
@@ -544,6 +580,7 @@ function AppContent() {
 
               headers: {
                 'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
               },
 
               body: JSON.stringify({
@@ -878,6 +915,26 @@ function AppContent() {
   ══════════════════════════════════════════════════════════════ */
 
   useEffect(() => {
+    // Don't touch the backend until we actually know who (if anyone)
+    // is logged in — avoids firing requests during the initial
+    // "verifying session" phase, before a token even exists.
+    if (!isAuthenticated || !user) {
+      return;
+    }
+
+    // A different account just signed in (including switching from one
+    // student to another in the same browser tab/session). Wipe any
+    // leftover conversation state from the previous user *before*
+    // loading this user's own history — this is what previously let
+    // one student's chat history "leak" into the next student's view.
+    const isAccountSwitch = lastUserIdRef.current !== user.id;
+
+    if (isAccountSwitch) {
+      lastUserIdRef.current = user.id;
+      resetConversationState();
+      initialized.current = false;
+    }
+
     if (initialized.current) {
       return;
     }
@@ -890,7 +947,7 @@ function AppContent() {
           await loadHistory();
 
         const savedId =
-          conversationId;
+          isAccountSwitch ? null : conversationId;
 
         /* --------------------------------------------------------
            CASE 1:
@@ -972,7 +1029,7 @@ function AppContent() {
     }
 
     initializeApp();
-  }, []);
+  }, [isAuthenticated, user]);
 
   
 
@@ -1105,10 +1162,7 @@ function AppContent() {
   if (cleanHash === '#account' || cleanHash === '#profile') {
     return (
       <AccountSettings
-        onSignOut={async () => {
-          await logout();
-          window.location.hash = '#login';
-        }}
+        onSignOut={performSignOut}
         onBackToChat={() => {
           window.location.hash = isAdmin ? '#admin' : '';
         }}
@@ -1121,10 +1175,7 @@ function AppContent() {
     return (
       <AdminPanel
         user={user}
-        onLogout={async () => {
-          await logout();
-          window.location.hash = '#login';
-        }}
+        onLogout={performSignOut}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
@@ -1414,10 +1465,7 @@ function AppContent() {
           {/* Sign out button */}
           <button
             type="button"
-            onClick={async () => {
-              await logout();
-              window.location.hash = '#login';
-            }}
+            onClick={performSignOut}
             className="sidebar-item"
             style={{
               display: 'flex',
@@ -1674,8 +1722,7 @@ function AppContent() {
                       type="button"
                       onClick={async () => {
                         setShowSettings(false);
-                        await logout();
-                        window.location.hash = '#login';
+                        await performSignOut();
                       }}
                       style={{
                         display: 'flex',
